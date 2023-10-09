@@ -201,9 +201,57 @@ async function handleScheduled(
   });
 }
 
+function maybeLog(req: Request, env: Env, ctx: ExecutionContext, msg: string) {
+  if (env[CoreBindings.JSON_LOG_LEVEL] < LogLevel.INFO) return;
+
+  const url = new URL(req.url);
+  const lines = [`New request: ${url}: ${msg}`];
+  const message = reset(lines.join(""));
+
+  ctx.waitUntil(
+    env[CoreBindings.SERVICE_LOOPBACK].fetch("http://localhost/core/log", {
+      method: "POST",
+      headers: { [SharedHeaders.LOG_LEVEL]: LogLevel.INFO.toString() },
+      body: message,
+    })
+  );
+}
+
 export default <ExportedHandler<Env>>{
   async fetch(request, env, ctx) {
     const startTime = Date.now();
+
+    if (
+      request.body !== null &&
+      request.method !== "GET" &&
+      request.method !== "HEAD"
+    ) {
+      const reader = request.body.getReader();
+      let length = 0;
+      const blobs = [];
+      while (true) {
+        const arr = await reader.read();
+        if (arr.done) break;
+        length += arr.value.length;
+        blobs.push(arr.value);
+      }
+
+      reader.releaseLock();
+      // We can't really modify request headers directly, so copy them
+      const headers = Object.fromEntries(request.headers);
+      if (length !== 0) {
+        headers["Content-Length"] = `${length}`;
+      } else {
+        delete headers["Content-Length"];
+      }
+
+      request = new Request(request, {
+        body: new Blob(blobs),
+        headers,
+        method: request.method,
+        cf: request.cf,
+      });
+    }
 
     // The proxy client will always specify an operation
     const isProxy = request.headers.get(CoreHeaders.OP) !== null;
